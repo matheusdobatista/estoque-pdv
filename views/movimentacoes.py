@@ -1,8 +1,19 @@
-"""Movimentações de estoque — entradas, saídas, ajustes."""
+"""Movimentações de estoque — entradas, saídas, ajustes.
+
+Inclui exclusão de movimentações.
+
+Regra de consistência:
+- Se a movimentação estiver vinculada a uma venda (nota "Venda #<id>"),
+  ao excluir a movimentação nós excluímos a VENDA inteira (e estornamos estoque)
+  para manter tudo consistente (itens + faturamento + estoque).
+- Para movimentações manuais (IN/OUT/ADJUST), exclui e ajusta estoque.
+"""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+
+import re
 
 import pandas as pd
 import streamlit as st
@@ -11,6 +22,9 @@ from audit import log as audit_log
 from auth import has_role, require_login
 from db import query, transaction
 from utils import df_to_xlsx_bytes, fmt_ts
+
+
+_RE_SALE = re.compile(r"\bVenda\s*#\s*(\d+)\b", re.IGNORECASE)
 
 
 def render() -> None:
@@ -22,14 +36,14 @@ def render() -> None:
     tabs = st.tabs(["📋 Histórico", "➕ Nova movimentação"] if can_write else ["📋 Histórico"])
 
     with tabs[0]:
-        _tab_history(can_write, user)
+        _tab_history()
 
     if can_write:
         with tabs[1]:
             _tab_new(user)
 
 
-def _tab_history(can_write: bool, user) -> None:
+def _tab_history() -> None:
     today = date.today()
     c1, c2, c3 = st.columns(3)
     start = c1.date_input("De", value=today - timedelta(days=7))
@@ -45,7 +59,7 @@ def _tab_history(can_write: bool, user) -> None:
 
     rows = query(
         f"""
-        SELECT m.id, m.created_at, m.type, m.qty, m.note,
+        SELECT m.id, m.product_id, m.created_at, m.type, m.qty, m.note,
                p.sku, p.name AS product_name,
                u.username
         FROM movements m
@@ -64,79 +78,126 @@ def _tab_history(can_write: bool, user) -> None:
     df = pd.DataFrame(rows)
     df["created_at"] = df["created_at"].apply(fmt_ts)
     df = df.rename(columns={
-        "created_at": "Data", "type": "Tipo", "sku": "SKU",
-        "product_name": "Produto", "qty": "Qtd", "note": "Observação",
+        "id": "ID",
+        "created_at": "Data",
+        "type": "Tipo",
+        "sku": "SKU",
+        "product_name": "Produto",
+        "qty": "Qtd",
+        "note": "Observação",
         "username": "Usuário",
+        "product_id": "PRODUCT_ID",
     })
     st.caption(f"{len(df)} movimento(s)")
-    st.dataframe(
-        df[["Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário"]],
-        hide_index=True, use_container_width=True,
+
+    st.markdown("#### 🗑️ Excluir movimentações")
+    st.caption(
+        "Selecione e exclua. Se a movimentação estiver vinculada a uma venda (nota 'Venda #'), "
+        "o sistema excluirá a venda inteira para manter consistência (estoque + itens + faturamento)."
     )
 
-    if can_write:
-        st.markdown("#### 🗑️ Excluir movimentações")
-        st.caption("Você pode excluir movimentações manuais (IN/OUT). Movimentos de venda (nota 'Venda #') ou ADJUST não podem ser excluídos aqui.")
-        work = df.copy()
-        work.insert(0, "Excluir", False)
-        ed = st.data_editor(
-            work[["Excluir", "Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário", "id"]],
-            hide_index=True,
-            use_container_width=True,
-            disabled=["Data","Tipo","SKU","Produto","Qtd","Observação","Usuário","id"],
-            column_config={"Excluir": st.column_config.CheckboxColumn("Excluir")},
-            height=320,
-            key="mov_delete_editor",
-        )
-        if st.button("Excluir selecionadas", type="primary", use_container_width=True):
-            ids = [int(r["id"]) for _, r in ed[ed["Excluir"] == True].iterrows()]
-            if not ids:
-                st.warning("Selecione ao menos uma movimentação.")
-            else:
-                try:
-                    with transaction() as conn:
-                        rows = conn.execute(
-                            "SELECT m.id, m.type, m.qty, m.note, m.product_id, p.stock, p.name AS product_name "
-                            "FROM movements m JOIN products p ON p.id=m.product_id WHERE m.id = ANY(%s) FOR UPDATE",
-                            [ids],
-                        ).fetchall()
-                        # validações e ajustes
-                        for r in rows:
-                            mtype = r["type"]
-                            note = (r["note"] or "")
-                            if mtype == "ADJUST":
-                                raise ValueError(f"Movimento {r['id']}: tipo ADJUST não pode ser excluído.")
-                            if note.strip().lower().startswith("venda #"):
-                                raise ValueError(f"Movimento {r['id']}: é de venda. Exclua a venda no Dashboard.")
+    # Data editor com seleção
+    work = df.copy()
+    work["Excluir"] = False
+    editor = st.data_editor(
+        work[["Excluir", "ID", "Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário"]],
+        hide_index=True,
+        use_container_width=True,
+        disabled=["ID", "Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário"],
+        column_config={
+            "Excluir": st.column_config.CheckboxColumn("Excluir"),
+        },
+        height=420,
+    )
 
-                        # aplica estorno de estoque e deleta
-                        for r in rows:
-                            pid = r["product_id"]
-                            qty = int(r["qty"])
-                            stock = int(r["stock"])
-                            if r["type"] == "IN":
-                                new_stock = stock - qty
-                                if new_stock < 0:
-                                    raise ValueError(f"Movimento {r['id']}: estorno deixaria estoque negativo.")
-                                conn.execute("UPDATE products SET stock=%s WHERE id=%s", [new_stock, pid])
-                            elif r["type"] == "OUT":
-                                new_stock = stock + qty
-                                conn.execute("UPDATE products SET stock=%s WHERE id=%s", [new_stock, pid])
-
-                        conn.execute("DELETE FROM movements WHERE id = ANY(%s)", [ids])
-                        audit_log(user, "MOVEMENT_DELETE", "movement", None, {"ids": ids}, conn=conn)
-
-                    st.success(f"{len(ids)} movimentação(ões) excluída(s).")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ {e}")
+    if st.button("🗑️ Excluir selecionadas", type="primary", use_container_width=True):
+        to_del = editor[editor["Excluir"] == True]
+        if to_del.empty:
+            st.warning("Selecione ao menos uma movimentação.")
+        else:
+            _delete_movements(df, to_del)
+            st.success("Exclusão concluída.")
+            st.rerun()
 
     st.download_button(
         "⬇️ Exportar Excel",
-        data=df_to_xlsx_bytes(df, "Movimentações"),
+        data=df_to_xlsx_bytes(df[["Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário"]], "Movimentações"),
         file_name=f"movimentacoes_{start}_{end}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+def _delete_movements(df_all: pd.DataFrame, df_sel: pd.DataFrame) -> None:
+    """Exclui movimentos selecionados.
+
+    - Movimentos de venda: exclui venda inteira.
+    - Movimentos manuais: exclui movimento e ajusta estoque.
+    """
+    # Determinar sale_ids a partir da observação
+    sale_ids: set[int] = set()
+    manual_rows: list[dict] = []
+
+    for _, r in df_sel.iterrows():
+        note = str(r.get("Observação") or "")
+        m = _RE_SALE.search(note)
+        if m:
+            try:
+                sale_ids.add(int(m.group(1)))
+                continue
+            except Exception:
+                pass
+        manual_rows.append({
+            "movement_id": int(r["ID"]),
+            "product_id": int(df_all.loc[df_all["ID"] == int(r["ID"]), "PRODUCT_ID"].iloc[0]),
+            "type": str(r.get("Tipo") or ""),
+            "qty": int(r.get("Qtd") or 0),
+        })
+
+    with transaction() as conn:
+        # 1) Excluir vendas (estorno)
+        for sid in sorted(sale_ids):
+            _delete_sale(conn, sid)
+
+        # 2) Excluir movimentos manuais e ajustar estoque
+        if manual_rows:
+            pids = sorted({x["product_id"] for x in manual_rows})
+            conn.execute("SELECT id FROM products WHERE id = ANY(%s) FOR UPDATE", [pids])
+
+        for mr in manual_rows:
+            pid = mr["product_id"]
+            qty = mr["qty"]
+            mtype = mr["type"]
+            if qty <= 0:
+                continue
+            if mtype == "IN":
+                conn.execute("UPDATE products SET stock = stock - %s WHERE id = %s", [qty, pid])
+            elif mtype == "OUT":
+                conn.execute("UPDATE products SET stock = stock + %s WHERE id = %s", [qty, pid])
+            elif mtype == "ADJUST":
+                # Não invertível sem histórico de estoque; mantém estoque atual.
+                pass
+            conn.execute("DELETE FROM movements WHERE id = %s", [mr["movement_id"]])
+
+
+def _delete_sale(conn, sale_id: int) -> None:
+    """Exclui venda e estorna estoque (itens + movimentos)."""
+    items = conn.execute(
+        "SELECT product_id, qty FROM sale_items WHERE sale_id = %s",
+        [sale_id],
+    ).fetchall()
+
+    if items:
+        pids = sorted({int(i["product_id"]) for i in items})
+        conn.execute("SELECT id FROM products WHERE id = ANY(%s) FOR UPDATE", [pids])
+        for it in items:
+            conn.execute(
+                "UPDATE products SET stock = stock + %s WHERE id = %s",
+                [int(it["qty"]), int(it["product_id"])],
+            )
+
+    # Apagar movimentos vinculados e a venda
+    conn.execute("DELETE FROM movements WHERE note ILIKE %s", [f"Venda #{sale_id}%"])
+    conn.execute("DELETE FROM sales WHERE id = %s", [sale_id])
 
 
 def _tab_new(user) -> None:
