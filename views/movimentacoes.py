@@ -22,14 +22,14 @@ def render() -> None:
     tabs = st.tabs(["📋 Histórico", "➕ Nova movimentação"] if can_write else ["📋 Histórico"])
 
     with tabs[0]:
-        _tab_history()
+        _tab_history(can_write, user)
 
     if can_write:
         with tabs[1]:
             _tab_new(user)
 
 
-def _tab_history() -> None:
+def _tab_history(can_write: bool, user) -> None:
     today = date.today()
     c1, c2, c3 = st.columns(3)
     start = c1.date_input("De", value=today - timedelta(days=7))
@@ -73,6 +73,63 @@ def _tab_history() -> None:
         df[["Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário"]],
         hide_index=True, use_container_width=True,
     )
+
+    if can_write:
+        st.markdown("#### 🗑️ Excluir movimentações")
+        st.caption("Você pode excluir movimentações manuais (IN/OUT). Movimentos de venda (nota 'Venda #') ou ADJUST não podem ser excluídos aqui.")
+        work = df.copy()
+        work.insert(0, "Excluir", False)
+        ed = st.data_editor(
+            work[["Excluir", "Data", "Tipo", "SKU", "Produto", "Qtd", "Observação", "Usuário", "id"]],
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Data","Tipo","SKU","Produto","Qtd","Observação","Usuário","id"],
+            column_config={"Excluir": st.column_config.CheckboxColumn("Excluir")},
+            height=320,
+            key="mov_delete_editor",
+        )
+        if st.button("Excluir selecionadas", type="primary", use_container_width=True):
+            ids = [int(r["id"]) for _, r in ed[ed["Excluir"] == True].iterrows()]
+            if not ids:
+                st.warning("Selecione ao menos uma movimentação.")
+            else:
+                try:
+                    with transaction() as conn:
+                        rows = conn.execute(
+                            "SELECT m.id, m.type, m.qty, m.note, m.product_id, p.stock, p.name AS product_name "
+                            "FROM movements m JOIN products p ON p.id=m.product_id WHERE m.id = ANY(%s) FOR UPDATE",
+                            [ids],
+                        ).fetchall()
+                        # validações e ajustes
+                        for r in rows:
+                            mtype = r["type"]
+                            note = (r["note"] or "")
+                            if mtype == "ADJUST":
+                                raise ValueError(f"Movimento {r['id']}: tipo ADJUST não pode ser excluído.")
+                            if note.strip().lower().startswith("venda #"):
+                                raise ValueError(f"Movimento {r['id']}: é de venda. Exclua a venda no Dashboard.")
+
+                        # aplica estorno de estoque e deleta
+                        for r in rows:
+                            pid = r["product_id"]
+                            qty = int(r["qty"])
+                            stock = int(r["stock"])
+                            if r["type"] == "IN":
+                                new_stock = stock - qty
+                                if new_stock < 0:
+                                    raise ValueError(f"Movimento {r['id']}: estorno deixaria estoque negativo.")
+                                conn.execute("UPDATE products SET stock=%s WHERE id=%s", [new_stock, pid])
+                            elif r["type"] == "OUT":
+                                new_stock = stock + qty
+                                conn.execute("UPDATE products SET stock=%s WHERE id=%s", [new_stock, pid])
+
+                        conn.execute("DELETE FROM movements WHERE id = ANY(%s)", [ids])
+                        audit_log(user, "MOVEMENT_DELETE", "movement", None, {"ids": ids}, conn=conn)
+
+                    st.success(f"{len(ids)} movimentação(ões) excluída(s).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ {e}")
 
     st.download_button(
         "⬇️ Exportar Excel",
