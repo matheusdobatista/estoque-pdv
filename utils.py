@@ -50,36 +50,10 @@ def money_fmt(v: Any) -> str:
 
 
 def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Dados") -> bytes:
-    """Serializa DataFrame como XLSX em memória. Use st.download_button.
-
-    Observação: pandas/openpyxl não aceitam datetimes com timezone.
-    (Ex.: TIMESTAMPTZ do Postgres vira datetime64[ns, UTC] no pandas)
-    """
-    safe = df.copy()
-    for col in safe.columns:
-        s = safe[col]
-        # datetime64 com tz
-        try:
-            if hasattr(s.dtype, "tz") and s.dtype.tz is not None:
-                safe[col] = pd.to_datetime(s).dt.tz_convert(None)
-                continue
-        except Exception:
-            pass
-
-        # object com Timestamp timezone-aware
-        if str(s.dtype) == "object":
-            def _fix(v):
-                try:
-                    if isinstance(v, pd.Timestamp) and v.tz is not None:
-                        return v.tz_convert(None).to_pydatetime()
-                except Exception:
-                    return v
-                return v
-            safe[col] = s.map(_fix)
-
+    """Serializa DataFrame como XLSX em memória. Use st.download_button."""
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        safe.to_excel(writer, index=False, sheet_name=(sheet_name[:31] or "Dados"))
+        df.to_excel(writer, index=False, sheet_name=sheet_name[:31] or "Dados")
     return buf.getvalue()
 
 
@@ -100,6 +74,11 @@ def next_sku_default(prefix: str = "DSP", width: int = 4) -> str:
 
 
 def fmt_ts(ts: datetime | None) -> str:
-    if ts is None:
+    """Formata timestamps com segurança (inclui NaT do pandas)."""
+    # pandas pode trazer NaT (Not-a-Time) em colunas datetime
+    if ts is None or pd.isna(ts):
         return "—"
-    return ts.strftime("%d/%m/%Y %H:%M")
+    try:
+        return ts.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return "—"

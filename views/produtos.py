@@ -112,33 +112,35 @@ def _tab_new(user) -> None:
     for c in consignors:
         cons_opts[c["name"]] = c["id"]
 
-    with st.form("new_product", clear_on_submit=True):
-        c1, c2 = st.columns([3, 1])
-        name = c1.text_input("Nome*")
-        sku = c2.text_input("SKU", value=next_sku_default())
+    # NÃO usar st.form aqui: checkbox/selectbox precisam re-renderizar ao marcar "consignado".
+    c1, c2 = st.columns([3, 1])
+    name = c1.text_input("Nome*", key="newp_name")
+    sku = c2.text_input("SKU", value=next_sku_default(), key="newp_sku")
 
-        c3, c4, c5 = st.columns(3)
-        price = c3.number_input("Preço (R$)*", min_value=0.0, step=0.5, format="%.2f")
-        unit_cost = c4.number_input("Custo unitário (R$)", min_value=0.0, step=0.5, format="%.2f")
-        stock = c5.number_input("Estoque inicial", min_value=0, step=1, value=0)
+    c3, c4, c5 = st.columns(3)
+    price = c3.number_input("Preço (R$)*", min_value=0.0, step=0.5, format="%.2f", key="newp_price")
+    unit_cost = c4.number_input("Custo unitário (R$)", min_value=0.0, step=0.5, format="%.2f", key="newp_unit_cost")
+    stock = c5.number_input("Estoque inicial", min_value=0, step=1, value=0, key="newp_stock")
 
-        c6, c7 = st.columns(2)
-        min_stock = c6.number_input("Estoque mínimo", min_value=0, step=1, value=5)
-        is_consigned = c7.checkbox("Produto consignado?", value=False)
+    c6, c7 = st.columns(2)
+    min_stock = c6.number_input("Estoque mínimo", min_value=0, step=1, value=5, key="newp_min_stock")
+    is_consigned = c7.checkbox("Produto consignado?", value=False, key="newp_is_consigned")
 
-        c8, c9 = st.columns(2)
-        consignor_label = c8.selectbox(
-            "Consignante",
-            list(cons_opts.keys()),
-            disabled=not is_consigned,
-        )
-        supplier_cost = c9.number_input(
-            "Repasse ao consignante (R$)",
-            min_value=0.0, step=0.5, format="%.2f",
-            disabled=not is_consigned,
-        )
+    c8, c9 = st.columns(2)
+    consignor_label = c8.selectbox(
+        "Consignante",
+        list(cons_opts.keys()),
+        disabled=not is_consigned,
+        key="newp_consignor",
+    )
+    supplier_cost = c9.number_input(
+        "Repasse ao consignante (R$)",
+        min_value=0.0, step=0.5, format="%.2f",
+        disabled=not is_consigned,
+        key="newp_supplier_cost",
+    )
 
-        submit = st.form_submit_button("Cadastrar", type="primary", use_container_width=True)
+    submit = st.button("Cadastrar", type="primary", use_container_width=True)
 
     if submit:
         if not name.strip():
@@ -149,6 +151,9 @@ def _tab_new(user) -> None:
             return
         if price <= 0:
             st.error("Preço deve ser maior que zero.")
+            return
+        if is_consigned and not cons_opts.get(consignor_label):
+            st.error("Selecione um consignante para produto consignado.")
             return
 
         # Verifica duplicidade de SKU
@@ -167,7 +172,7 @@ def _tab_new(user) -> None:
                     name.strip(), sku.strip(), price, unit_cost or None,
                     int(stock), int(min_stock), is_consigned,
                     cons_opts.get(consignor_label) if is_consigned else None,
-                    supplier_cost or None if is_consigned else None,
+                    (float(supplier_cost) if (is_consigned and float(supplier_cost) > 0) else None),
                 ],
             )
             pid = row["id"]

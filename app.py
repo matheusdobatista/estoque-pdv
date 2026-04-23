@@ -8,7 +8,6 @@ Deploy: push pro GitHub → Streamlit Community Cloud conecta ao repo.
 from __future__ import annotations
 
 import streamlit as st
-import os
 
 # Configuração de página — deve ser a PRIMEIRA chamada streamlit
 st.set_page_config(
@@ -55,17 +54,15 @@ def inject_css() -> None:
 
 # Mapa de páginas por papel
 PAGES_BY_ROLE = {
+    # Dashboard removido (será feito no Power BI)
     "ADMIN":     ["PDV", "Produtos", "Movimentações", "Fiado",
-                  "Consignantes", "Vendedores", "Dashboard", "Configurações"],
-    "OPERADOR":  ["PDV", "Produtos", "Movimentações", "Fiado", "Dashboard"],
-    "GERENCIAL": ["Dashboard", "Fiado", "Produtos", "Movimentações"],
+                  "Consignantes", "Vendedores", "Configurações"],
+    "OPERADOR":  ["PDV", "Produtos", "Movimentações", "Fiado"],
+    "GERENCIAL": ["Fiado", "Produtos", "Movimentações"],
 }
 
 
 def render_sidebar(user) -> str:
-    logo_path = os.path.join(os.path.dirname(__file__), "assets", "despertar_logo.png")
-    if os.path.exists(logo_path):
-        st.sidebar.image(logo_path, use_container_width=True)
     st.sidebar.markdown(f"### 🛒 Mercadinho")
     st.sidebar.caption(
         st.secrets.get("app", {}).get("instance_name", "VI Despertar 2026")
@@ -99,8 +96,6 @@ def route(page: str) -> None:
         from views import consignantes; consignantes.render()
     elif page == "Vendedores":
         from views import vendedores; vendedores.render()
-    elif page == "Dashboard":
-        from views import dashboard; dashboard.render()
     elif page == "Configurações":
         from views import config; config.render()
     else:
