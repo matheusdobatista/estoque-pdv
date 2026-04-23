@@ -8,6 +8,7 @@ Deploy: push pro GitHub → Streamlit Community Cloud conecta ao repo.
 from __future__ import annotations
 
 import streamlit as st
+import os
 
 # Configuração de página — deve ser a PRIMEIRA chamada streamlit
 st.set_page_config(
@@ -62,6 +63,9 @@ PAGES_BY_ROLE = {
 
 
 def render_sidebar(user) -> str:
+    logo_path = os.path.join(os.path.dirname(__file__), "assets", "despertar_logo.png")
+    if os.path.exists(logo_path):
+        st.sidebar.image(logo_path, use_container_width=True)
     st.sidebar.markdown(f"### 🛒 Mercadinho")
     st.sidebar.caption(
         st.secrets.get("app", {}).get("instance_name", "VI Despertar 2026")

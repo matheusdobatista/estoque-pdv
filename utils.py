@@ -74,6 +74,9 @@ def next_sku_default(prefix: str = "DSP", width: int = 4) -> str:
 
 
 def fmt_ts(ts: datetime | None) -> str:
-    if ts is None:
+    try:
+        if ts is None or pd.isna(ts):
+            return "—"
+        return ts.strftime("%d/%m/%Y %H:%M")
+    except Exception:
         return "—"
-    return ts.strftime("%d/%m/%Y %H:%M")

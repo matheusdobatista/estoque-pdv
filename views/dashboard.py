@@ -7,10 +7,11 @@ Versão inicial: KPIs principais + gráficos de evolução e rankings.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-
-import altair as alt
 import pandas as pd
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from auth import require_login
 from db import query
@@ -110,17 +111,40 @@ def _charts(start_ts: datetime, end_ts: datetime) -> None:
     df = pd.DataFrame(rows)
     df["revenue"] = df["revenue"].astype(float)
 
-    st.subheader("Faturamento por dia")
-    bar = alt.Chart(df).mark_bar(color="#14B8A6").encode(
-        x=alt.X("day:T", title="Dia"),
-        y=alt.Y("revenue:Q", title="Faturamento (R$)"),
-        tooltip=[
-            alt.Tooltip("day:T", title="Dia"),
-            alt.Tooltip("revenue:Q", title="R$", format=",.2f"),
-            alt.Tooltip("sales_count:Q", title="Vendas"),
-        ],
-    ).properties(height=280)
-    st.altair_chart(bar, use_container_width=True)
+    st.subheader("Evolução no período")
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Bar(
+            x=df["day"],
+            y=df["sales_count"],
+            name="Vendas (qtd)",
+            marker_color="#0F766E",
+            opacity=0.85,
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["day"],
+            y=df["revenue"],
+            name="Faturamento (R$)",
+            mode="lines+markers",
+            line=dict(color="#14B8A6", width=3),
+            marker=dict(size=6),
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        height=360,
+        margin=dict(l=20, r=20, t=40, b=20),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_yaxes(title_text="Qtd de vendas", secondary_y=False, showgrid=True, gridcolor="rgba(2,6,23,0.06)")
+    fig.update_yaxes(title_text="Faturamento (R$)", secondary_y=True, showgrid=False)
+    st.plotly_chart(fig, use_container_width=True)
+
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +155,7 @@ def _rankings(start_ts: datetime, end_ts: datetime) -> None:
     left, right = st.columns(2)
 
     with left:
-        st.subheader("Top 10 produtos")
+        st.subheader("Top produtos (receita)")
         rows = query(
             """
             SELECT p.name,
@@ -150,16 +174,35 @@ def _rankings(start_ts: datetime, end_ts: datetime) -> None:
         if rows:
             df = pd.DataFrame(rows)
             df["revenue"] = df["revenue"].astype(float)
+            fig = px.bar(
+                df.sort_values("revenue", ascending=True),
+                x="revenue",
+                y="name",
+                orientation="h",
+                text="revenue",
+                labels={"revenue": "Receita (R$)", "name": ""},
+                color_discrete_sequence=["#14B8A6"],
+            )
+            fig.update_traces(texttemplate="R$ %{text:,.2f}", textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=360,
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                yaxis=dict(tickfont=dict(size=12)),
+            )
+            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(
                 df.rename(columns={"name": "Produto", "qty": "Qtd", "revenue": "Receita"}),
-                hide_index=True, use_container_width=True,
+                hide_index=True,
+                use_container_width=True,
                 column_config={"Receita": st.column_config.NumberColumn(format="R$ %.2f")},
             )
         else:
             st.caption("Sem dados.")
 
     with right:
-        st.subheader("Top vendedores")
+        st.subheader("Top vendedores (receita)")
         rows = query(
             """
             SELECT COALESCE(sl.name, '(sem vendedor)') AS seller,
@@ -177,13 +220,33 @@ def _rankings(start_ts: datetime, end_ts: datetime) -> None:
         if rows:
             df = pd.DataFrame(rows)
             df["revenue"] = df["revenue"].astype(float)
+            fig = px.bar(
+                df.sort_values("revenue", ascending=True),
+                x="revenue",
+                y="seller",
+                orientation="h",
+                text="revenue",
+                labels={"revenue": "Receita (R$)", "seller": ""},
+                color_discrete_sequence=["#0F766E"],
+            )
+            fig.update_traces(texttemplate="R$ %{text:,.2f}", textposition="outside", cliponaxis=False)
+            fig.update_layout(
+                height=360,
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                yaxis=dict(tickfont=dict(size=12)),
+            )
+            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(
                 df.rename(columns={"seller": "Vendedor", "sales": "Vendas", "revenue": "Receita"}),
-                hide_index=True, use_container_width=True,
+                hide_index=True,
+                use_container_width=True,
                 column_config={"Receita": st.column_config.NumberColumn(format="R$ %.2f")},
             )
         else:
             st.caption("Sem dados.")
+
 
 
 # ---------------------------------------------------------------------------
