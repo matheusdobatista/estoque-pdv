@@ -1,145 +1,143 @@
-"""Dashboard gerencial."""
+"""Dashboard (UX upgrade)
+
+Mudanças:
+- Sem filtro de datas (usa tudo que existe no banco)
+- KPIs em cards (estilo “print 1”)
+- Remove gráfico de evolução do período
+- Rankings com visual mais limpo (estilo “print 2”)
+- Mantém Prestação de contas (consignantes)
+- Adiciona relatório detalhado de itens vendidos (1 linha por item) + export Excel
+- Remove relatório de estoque baixo
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-import altair as alt
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 from auth import require_login
 from db import query
 from utils import df_to_xlsx_bytes, money_fmt
 
 
-# ---------------------------------------------------------------------------
-# Render principal
-# ---------------------------------------------------------------------------
-
 def render() -> None:
     require_login()
-    _inject_dashboard_css()
+
+    _inject_css()
 
     st.title("📊 Dashboard")
-    st.caption("Visão consolidada do período de uso do sistema. Sem filtro de data.")
+    st.caption("Resumo geral do Mercadinho (sem filtro de datas).")
 
-    _kpis()
+    # Período “all time” (sistema rodará por pouco tempo)
+    start_ts = datetime(2000, 1, 1)
+    end_ts = datetime.utcnow() + timedelta(days=1)
+
+    _kpis_cards(start_ts, end_ts)
     st.divider()
-    _rankings()
+
+    _rankings_clean(start_ts, end_ts)
     st.divider()
-    _consignor_report()
+
+    _consignor_report(start_ts, end_ts)
     st.divider()
-    _sales_detail_report()
+
+    _sales_items_report(start_ts, end_ts)
 
 
-# ---------------------------------------------------------------------------
-# Estilo
-# ---------------------------------------------------------------------------
-
-def _inject_dashboard_css() -> None:
+def _inject_css() -> None:
     st.markdown(
         """
-        <style>
-            .dash-section-title {
-                font-size: 1.15rem;
-                font-weight: 700;
-                color: #0F172A;
-                margin-bottom: 0.3rem;
-            }
-            .dash-section-subtitle {
-                color: #64748B;
-                font-size: 0.93rem;
-                margin-bottom: 1rem;
-            }
-            .dash-card {
-                background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
-                border: 1px solid #E2E8F0;
-                border-radius: 18px;
-                padding: 1rem 1.1rem;
-                box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
-                min-height: 132px;
-                position: relative;
-                overflow: hidden;
-            }
-            .dash-card::after {
-                content: "";
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                height: 4px;
-                background: var(--accent-color, #14B8A6);
-            }
-            .dash-card-top {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 0.7rem;
-            }
-            .dash-icon {
-                width: 36px;
-                height: 36px;
-                border-radius: 12px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1rem;
-                background: var(--accent-soft, #CCFBF1);
-            }
-            .dash-card-label {
-                font-size: 0.85rem;
-                color: #64748B;
-                margin-bottom: 0.35rem;
-                line-height: 1.2;
-            }
-            .dash-card-value {
-                font-size: 1.8rem;
-                line-height: 1.1;
-                font-weight: 800;
-                color: #0F172A;
-                margin-bottom: 0.35rem;
-            }
-            .dash-card-foot {
-                font-size: 0.84rem;
-                color: #475569;
-                line-height: 1.35;
-            }
-            .dash-block {
-                background: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 18px;
-                padding: 1rem 1rem 0.75rem 1rem;
-                box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
-                margin-bottom: 1rem;
-            }
-            .dash-note {
-                color: #64748B;
-                font-size: 0.88rem;
-                margin-top: -0.4rem;
-                margin-bottom: 0.6rem;
-            }
-        </style>
+<style>
+/* KPI cards */
+.kpi-grid{
+  display:grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1200px){
+  .kpi-grid{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }
+}
+.kpi{
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,.06);
+  border-radius: 16px;
+  padding: 14px 14px 12px 14px;
+  box-shadow: 0 10px 22px rgba(0,0,0,.05);
+}
+.kpi-top{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.kpi-ico{
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size: 16px;
+  background: rgba(17,75,95,.10);
+  color: #114B5F;
+}
+.kpi-title{
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(0,0,0,.55);
+  line-height: 1.1;
+}
+.kpi-value{
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-top: 2px;
+}
+.kpi-sub{
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(0,0,0,.50);
+}
+
+/* Chart containers */
+.chart-card{
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,.06);
+  border-radius: 18px;
+  padding: 14px 14px 10px 14px;
+  box-shadow: 0 10px 22px rgba(0,0,0,.05);
+}
+.chart-title{
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+.chart-sub{
+  color: rgba(0,0,0,.55);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+</style>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ---------------------------------------------------------------------------
-# KPIs
-# ---------------------------------------------------------------------------
-
-def _kpis() -> None:
+def _kpi_cards(start_ts: datetime, end_ts: datetime) -> None:
     r = query(
         """
         SELECT
-            COUNT(*) AS sales_count,
-            COALESCE(SUM(total), 0) AS revenue,
-            COALESCE(AVG(total), 0) AS ticket_avg,
+            COUNT(*)                                      AS sales_count,
+            COALESCE(SUM(total), 0)                       AS revenue,
+            COALESCE(AVG(total), 0)                       AS ticket_avg,
             COALESCE(SUM(CASE WHEN payment_status='ABERTO' THEN total END), 0) AS open_total,
             COUNT(*) FILTER (WHERE payment_status='ABERTO') AS open_count
         FROM sales
-        """
+        WHERE created_at >= %s AND created_at < %s
+        """,
+        [start_ts, end_ts],
     )[0]
 
     profit_row = query(
@@ -149,246 +147,208 @@ def _kpis() -> None:
             COALESCE(SUM(si.line_total), 0) AS gross_revenue
         FROM sale_items si
         JOIN sales s ON s.id = si.sale_id
-        WHERE s.payment_status = 'PAGO'
-        """
+        WHERE s.created_at >= %s AND s.created_at < %s
+          AND s.payment_status = 'PAGO'
+        """,
+        [start_ts, end_ts],
     )[0]
 
-    gross_profit = float(profit_row["gross_profit"] or 0)
-    gross_rev = float(profit_row["gross_revenue"] or 0)
+    revenue = float(r.get("revenue") or 0)
+    sales_count = int(r.get("sales_count") or 0)
+    ticket = float(r.get("ticket_avg") or 0)
+    open_total = float(r.get("open_total") or 0)
+    open_count = int(r.get("open_count") or 0)
+
+    gross_profit = float(profit_row.get("gross_profit") or 0)
+    gross_rev = float(profit_row.get("gross_revenue") or 0)
     margin = (gross_profit / gross_rev * 100) if gross_rev > 0 else 0.0
+    cost_total = max(gross_rev - gross_profit, 0.0)
 
-    st.markdown('<div class="dash-section-title">Resumo geral</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="dash-section-subtitle">Indicadores consolidados de vendas, resultado e fiado.</div>',
-        unsafe_allow_html=True,
-    )
-
-    row1 = st.columns(3)
-    row2 = st.columns(3)
-
-    _metric_card(
-        row1[0],
-        title="Faturamento",
-        value=money_fmt(r["revenue"]),
-        foot="Valor total vendido no período do evento.",
-        icon="💰",
-        accent="#14B8A6",
-        soft="#CCFBF1",
-    )
-    _metric_card(
-        row1[1],
-        title="Vendas",
-        value=f"{int(r['sales_count'] or 0)}",
-        foot="Quantidade total de vendas registradas.",
-        icon="🧾",
-        accent="#8B5CF6",
-        soft="#EDE9FE",
-    )
-    _metric_card(
-        row1[2],
-        title="Ticket médio",
-        value=money_fmt(r["ticket_avg"]),
-        foot="Média de valor por venda realizada.",
-        icon="🛍️",
-        accent="#F59E0B",
-        soft="#FEF3C7",
-    )
-    _metric_card(
-        row2[0],
-        title="Lucro bruto (pagos)",
-        value=money_fmt(gross_profit),
-        foot="Receita paga menos custo dos itens vendidos.",
-        icon="📈",
-        accent="#22C55E",
-        soft="#DCFCE7",
-    )
-    _metric_card(
-        row2[1],
-        title="Margem",
-        value=f"{margin:.1f}%",
-        foot="Margem bruta calculada sobre vendas pagas.",
-        icon="📊",
-        accent="#0EA5E9",
-        soft="#E0F2FE",
-    )
-    _metric_card(
-        row2[2],
-        title="Em aberto (fiado)",
-        value=money_fmt(r["open_total"]),
-        foot=f"{int(r['open_count'] or 0)} venda(s) ainda em aberto.",
-        icon="⏳",
-        accent="#EF4444",
-        soft="#FEE2E2",
-    )
-
-
-def _metric_card(col, title: str, value: str, foot: str, icon: str, accent: str, soft: str) -> None:
-    col.markdown(
         f"""
-        <div class="dash-card" style="--accent-color:{accent}; --accent-soft:{soft};">
-            <div class="dash-card-top">
-                <div class="dash-card-label">{title}</div>
-                <div class="dash-icon">{icon}</div>
-            </div>
-            <div class="dash-card-value">{value}</div>
-            <div class="dash-card-foot">{foot}</div>
-        </div>
+<div class="kpi-grid">
+  {_kpi_html("💰","Faturamento", money_fmt(revenue), "Total vendido")}
+  {_kpi_html("🧾","Vendas", f"{sales_count}", "Quantidade de cupons")}
+  {_kpi_html("🎟️","Ticket médio", money_fmt(ticket), "Média por venda")}
+  {_kpi_html("⏳","Em aberto (Fiado)", money_fmt(open_total), f"{open_count} venda(s)")}
+</div>
+<br/>
+<div class="kpi-grid" style="grid-template-columns: repeat(2, minmax(160px, 1fr));">
+  {_kpi_html("📈","Lucro bruto (pagos)", money_fmt(gross_profit), f"Margem: {margin:,.1f}%".replace(",", "X").replace(".", ",").replace("X","."))}
+  {_kpi_html("🧮","Custo estimado (pagos)", money_fmt(cost_total), "Custo total (unitário x qtd)")}
+</div>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ---------------------------------------------------------------------------
-# Rankings
-# ---------------------------------------------------------------------------
-
-def _rankings() -> None:
-    st.markdown('<div class="dash-section-title">Rankings</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="dash-section-subtitle">Visual dos rankings em barras horizontais, com foco em leitura rápida.</div>',
-        unsafe_allow_html=True,
+def _kpi_html(icon: str, title: str, value: str, sub: str) -> str:
+    return (
+        f"<div class='kpi'>"
+        f"  <div class='kpi-top'>"
+        f"    <div class='kpi-ico'>{icon}</div>"
+        f"    <div class='kpi-title'>{title}</div>"
+        f"  </div>"
+        f"  <div class='kpi-value'>{value}</div>"
+        f"  <div class='kpi-sub'>{sub}</div>"
+        f"</div>"
     )
 
-    left, right = st.columns(2)
 
-    with left:
-        st.markdown('<div class="dash-block">', unsafe_allow_html=True)
-        st.subheader("Top produtos")
-        st.caption("Ranking por faturamento dos itens vendidos.")
-        rows = query(
+def _rankings_clean(start_ts: datetime, end_ts: datetime) -> None:
+    st.subheader("🏆 Rankings")
+
+    c1, c2 = st.columns(2)
+
+    df_prod = pd.DataFrame(
+        query(
             """
             SELECT
-                p.name,
-                SUM(si.qty) AS qty,
-                SUM(si.line_total) AS revenue
+              p.name AS produto,
+              p.sku AS sku,
+              COALESCE(SUM(si.qty),0) AS qtd,
+              COALESCE(SUM(si.line_total),0) AS faturamento
             FROM sale_items si
             JOIN sales s ON s.id = si.sale_id
             JOIN products p ON p.id = si.product_id
-            GROUP BY p.name
-            ORDER BY revenue DESC
+            WHERE s.created_at >= %s AND s.created_at < %s
+            GROUP BY p.id
+            ORDER BY faturamento DESC
             LIMIT 10
-            """
+            """,
+            [start_ts, end_ts],
         )
-        if rows:
-            df = pd.DataFrame(rows)
-            df["revenue"] = df["revenue"].astype(float)
-            df["qty"] = df["qty"].astype(int)
-            _horizontal_bar_chart(
-                df,
-                category_col="name",
-                value_col="revenue",
-                value_title="Faturamento",
-                color="#14B8A6",
-            )
-            table_df = df.rename(columns={"name": "Produto", "qty": "Qtd", "revenue": "Faturamento"})
-            st.dataframe(
-                table_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Faturamento": st.column_config.NumberColumn(format="R$ %.2f"),
-                },
-            )
-        else:
-            st.info("Sem dados de produtos vendidos.")
-        st.markdown('</div>', unsafe_allow_html=True)
+    )
 
-    with right:
-        st.markdown('<div class="dash-block">', unsafe_allow_html=True)
-        st.subheader("Top vendedores")
-        st.caption("Ranking por faturamento das vendas registradas.")
-        rows = query(
+    df_sell = pd.DataFrame(
+        query(
             """
             SELECT
-                COALESCE(sl.name, '(sem vendedor)') AS seller,
-                COUNT(*) AS sales,
-                SUM(s.total) AS revenue
+              COALESCE(se.name, '—') AS vendedor,
+              COUNT(*) AS vendas,
+              COALESCE(SUM(s.total),0) AS faturamento
             FROM sales s
-            LEFT JOIN sellers sl ON sl.id = s.seller_id
-            GROUP BY sl.name
-            ORDER BY revenue DESC
+            LEFT JOIN sellers se ON se.id = s.seller_id
+            WHERE s.created_at >= %s AND s.created_at < %s
+            GROUP BY vendedor
+            ORDER BY faturamento DESC
             LIMIT 10
-            """
+            """,
+            [start_ts, end_ts],
         )
-        if rows:
-            df = pd.DataFrame(rows)
-            df["revenue"] = df["revenue"].astype(float)
-            df["sales"] = df["sales"].astype(int)
-            _horizontal_bar_chart(
-                df,
-                category_col="seller",
-                value_col="revenue",
-                value_title="Faturamento",
-                color="#8B5CF6",
-            )
-            table_df = df.rename(columns={"seller": "Vendedor", "sales": "Vendas", "revenue": "Faturamento"})
-            st.dataframe(
-                table_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Faturamento": st.column_config.NumberColumn(format="R$ %.2f"),
-                },
-            )
+    )
+
+    with c1:
+        st.markdown("<div class='chart-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-title'>Top produtos (faturamento)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-sub'>Barras horizontais • valores fora da barra</div>", unsafe_allow_html=True)
+        if df_prod.empty:
+            st.info("Sem dados ainda.")
         else:
-            st.info("Sem dados de vendedores.")
-        st.markdown('</div>', unsafe_allow_html=True)
+            dfp = df_prod.sort_values("faturamento", ascending=True)
+            fig = px.bar(dfp, x="faturamento", y="produto", orientation="h", text="faturamento")
+            fig.update_traces(
+                marker_color="#114B5F",
+                texttemplate="R$ %{x:,.2f}",
+                textposition="outside",
+                cliponaxis=False,
+            )
+            fig.update_layout(
+                height=360,
+                margin=dict(l=10, r=34, t=0, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
+            fig.update_yaxes(showgrid=False, ticks="", title=None)
+            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("<div class='chart-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-title'>Ranking vendedores (faturamento)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-sub'>Total vendido por vendedor</div>", unsafe_allow_html=True)
+        if df_sell.empty:
+            st.info("Sem dados ainda.")
+        else:
+            dfs = df_sell.sort_values("faturamento", ascending=True)
+            fig = px.bar(dfs, x="faturamento", y="vendedor", orientation="h", text="faturamento")
+            fig.update_traces(
+                marker_color="#1A936F",
+                texttemplate="R$ %{x:,.2f}",
+                textposition="outside",
+                cliponaxis=False,
+            )
+            fig.update_layout(
+                height=360,
+                margin=dict(l=10, r=34, t=0, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
+            fig.update_yaxes(showgrid=False, ticks="", title=None)
+            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _horizontal_bar_chart(
-    df: pd.DataFrame,
-    category_col: str,
-    value_col: str,
-    value_title: str,
-    color: str,
-) -> None:
-    plot_df = df.copy().sort_values(value_col, ascending=False).head(10)
-    plot_df["label"] = plot_df[value_col].apply(money_fmt)
+def _sales_items_report(start_ts: datetime, end_ts: datetime) -> None:
+    st.subheader("🧾 Detalhamento de itens vendidos")
+    st.caption("1 linha por item vendido (venda + produto + consignante).")
 
-    base = alt.Chart(plot_df).encode(
-        y=alt.Y(
-            f"{category_col}:N",
-            sort=alt.EncodingSortField(field=value_col, order="descending"),
-            title=None,
-            axis=alt.Axis(labelFontSize=12, labelLimit=220, ticks=False, domain=False),
-        ),
-        x=alt.X(
-            f"{value_col}:Q",
-            title=None,
-            axis=alt.Axis(labels=False, ticks=False, domain=False, grid=False),
-        ),
+    rows = query(
+        """
+        SELECT
+            s.id AS venda_id,
+            s.created_at AS data_hora,
+            COALESCE(se.name, '—') AS vendedor,
+            COALESCE(s.buyer_name, '') AS comprador,
+            COALESCE(s.buyer_team, '') AS equipe_comprador,
+            s.payment_method AS forma_pagamento,
+            s.payment_status AS status_pagamento,
+
+            p.sku AS sku,
+            p.name AS produto,
+            si.qty AS qtd,
+            si.unit_price AS preco_unit,
+            COALESCE(si.unit_cost, p.unit_cost, 0) AS custo_unit,
+            si.line_total AS faturamento_item,
+
+            CASE WHEN p.is_consigned THEN 'Consignado' ELSE 'Padrão' END AS tipo,
+            COALESCE(cg.name,'') AS consignante,
+            COALESCE(p.supplier_unit_cost, 0) AS repasse_unit,
+            (COALESCE(p.supplier_unit_cost, 0) * si.qty) AS repasse_total
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN sellers se ON se.id = s.seller_id
+        JOIN products p ON p.id = si.product_id
+        LEFT JOIN consignors cg ON cg.id = p.consignor_id
+        WHERE s.created_at >= %s AND s.created_at < %s
+        ORDER BY s.created_at DESC, s.id DESC, si.id DESC
+        """,
+        [start_ts, end_ts],
     )
 
-    bars = base.mark_bar(cornerRadiusEnd=8, size=26, color=color).encode(
-        tooltip=[
-            alt.Tooltip(f"{category_col}:N", title="Item"),
-            alt.Tooltip(f"{value_col}:Q", title=value_title, format=",.2f"),
-        ]
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        st.info("Sem itens vendidos ainda.")
+        return
+
+    st.download_button(
+        "⬇️ Exportar itens vendidos (Excel)",
+        data=df_to_xlsx_bytes(df, "ItensVendidos"),
+        file_name="itens_vendidos_detalhado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
     )
-
-    text = base.mark_text(
-        align="left",
-        baseline="middle",
-        dx=8,
-        color="#334155",
-        fontSize=12,
-        fontWeight="bold",
-    ).encode(text="label:N")
-
-    chart = (bars + text).properties(height=max(260, len(plot_df) * 34))
-    st.altair_chart(chart, use_container_width=True)
+    st.dataframe(df, use_container_width=True, height=520)
 
 
-# ---------------------------------------------------------------------------
-# Prestação de contas (Consignantes) - mantido
-# ---------------------------------------------------------------------------
-
-def _consignor_report() -> None:
-    st.markdown('<div class="dash-section-title">Prestação de contas — Consignantes</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="dash-section-subtitle">Comparativo por produto: cadastrado inicialmente x vendido, com faturamento e repasse.</div>',
-        unsafe_allow_html=True,
-    )
+def _consignor_report(start_ts: datetime, end_ts: datetime) -> None:
+    st.subheader("📄 Prestação de contas — Consignantes")
+    st.caption("Comparativo por produto: cadastrado (inicial) × vendido no período, com faturamento e repasse.")
 
     cons = query("SELECT id, name, active FROM consignors ORDER BY active DESC, name")
     if not cons:
@@ -419,16 +379,13 @@ def _consignor_report() -> None:
         FROM products p
         LEFT JOIN sale_items si ON si.product_id = p.id
         LEFT JOIN sales s ON s.id = si.sale_id
+                      AND s.created_at >= %s AND s.created_at < %s
         WHERE p.is_consigned = TRUE
           AND p.consignor_id = %s
-          AND (
-                s.id IS NULL
-                OR s.id IN (SELECT id FROM sales)
-              )
         GROUP BY p.sku, p.name, p.initial_stock, p.price, p.supplier_unit_cost
         ORDER BY p.name
         """,
-        [consignor_id],
+        [start_ts, end_ts, consignor_id],
     )
 
     if not rows:
@@ -494,112 +451,6 @@ def _consignor_report() -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
-
 # ---------------------------------------------------------------------------
-# Relatório detalhado de vendas
+# Low stock
 # ---------------------------------------------------------------------------
-
-def _sales_detail_report() -> None:
-    st.markdown('<div class="dash-section-title">Relatório detalhado de vendas</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="dash-section-subtitle">Cada linha representa um item vendido dentro de uma venda. Ideal para auditoria e exportação.</div>',
-        unsafe_allow_html=True,
-    )
-
-    rows = query(
-        """
-        SELECT
-            s.id AS venda,
-            s.created_at,
-            COALESCE(sl.name, '(sem vendedor)') AS vendedor,
-            COALESCE(s.buyer_name, '') AS comprador,
-            COALESCE(s.buyer_team, '') AS equipe,
-            s.payment_method AS forma_pagamento,
-            s.payment_status AS status_pagamento,
-            s.total AS total_venda,
-            p.sku,
-            p.name AS produto,
-            si.qty AS quantidade,
-            COALESCE(si.unit_cost, 0)::numeric(12,2) AS custo_unitario,
-            CASE WHEN p.is_consigned THEN 'Sim' ELSE 'Não' END AS consignado,
-            COALESCE(c.name, '') AS consignante,
-            si.unit_price::numeric(12,2) AS preco_unitario,
-            si.line_total::numeric(12,2) AS faturamento_item,
-            (COALESCE(si.unit_cost, 0) * si.qty)::numeric(12,2) AS valor_repasse,
-            ((si.unit_price - COALESCE(si.unit_cost, 0)) * si.qty)::numeric(12,2) AS lucro_bruto_item
-        FROM sale_items si
-        JOIN sales s ON s.id = si.sale_id
-        JOIN products p ON p.id = si.product_id
-        LEFT JOIN sellers sl ON sl.id = s.seller_id
-        LEFT JOIN consignors c ON c.id = p.consignor_id
-        ORDER BY s.created_at DESC, s.id DESC, p.name
-        """
-    )
-
-    if not rows:
-        st.info("Nenhuma venda registrada até o momento.")
-        return
-
-    df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"])
-    df["Data/Hora"] = df["created_at"].dt.strftime("%d/%m/%Y %H:%M")
-
-    for col in ["total_venda", "custo_unitario", "preco_unitario", "faturamento_item", "valor_repasse", "lucro_bruto_item"]:
-        df[col] = df[col].astype(float)
-    df["quantidade"] = df["quantidade"].astype(int)
-
-    show = df[[
-        "venda", "Data/Hora", "vendedor", "comprador", "equipe",
-        "forma_pagamento", "status_pagamento", "total_venda",
-        "sku", "produto", "quantidade", "custo_unitario",
-        "consignado", "consignante", "preco_unitario",
-        "faturamento_item", "valor_repasse", "lucro_bruto_item",
-    ]].rename(columns={
-        "venda": "Venda",
-        "vendedor": "Vendedor",
-        "comprador": "Comprador",
-        "equipe": "Equipe",
-        "forma_pagamento": "Forma de pagamento",
-        "status_pagamento": "Status",
-        "total_venda": "Total da venda",
-        "sku": "SKU",
-        "produto": "Produto",
-        "quantidade": "Qtd",
-        "custo_unitario": "Custo unitário",
-        "consignado": "Consignado",
-        "consignante": "Consignante",
-        "preco_unitario": "Preço unitário",
-        "faturamento_item": "Faturamento item",
-        "valor_repasse": "Valor de repasse",
-        "lucro_bruto_item": "Lucro bruto item",
-    })
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Itens vendidos", f"{int(show['Qtd'].sum())}")
-    c2.metric("Linhas no relatório", f"{len(show)}")
-    c3.metric("Faturamento dos itens", money_fmt(show["Faturamento item"].sum()))
-    c4.metric("Repasse dos itens", money_fmt(show["Valor de repasse"].sum()))
-
-    st.download_button(
-        "⬇️ Exportar relatório detalhado (Excel)",
-        data=df_to_xlsx_bytes(show, "VendasDetalhadas"),
-        file_name="relatorio_detalhado_vendas.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-    st.dataframe(
-        show,
-        hide_index=True,
-        use_container_width=True,
-        height=460,
-        column_config={
-            "Total da venda": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Custo unitário": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Preço unitário": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Faturamento item": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Valor de repasse": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Lucro bruto item": st.column_config.NumberColumn(format="R$ %.2f"),
-        },
-    )

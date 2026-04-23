@@ -143,18 +143,24 @@ def render() -> None:
 
     # ---- Pagamento ----
     st.divider()
-    p1, p2, p3 = st.columns(3)
+        p1, p2, p3 = st.columns(3)
     payment_method = p1.selectbox("Forma de pagamento*", PAYMENT_METHODS)
 
-    if payment_method == "Fiado":
+    # Considera "Fiado" mesmo se o texto mudar (ex: "Fiado (em aberto)")
+    is_fiado = str(payment_method).strip().lower().startswith("fiado")
+
+    if is_fiado:
         paid = 0.0
         change = 0.0
-        p2.number_input("Pago (R$)", value=0.0, disabled=True)
-        p3.caption("Sem troco (fiado)")
+        p2.number_input("Pago (R$)*", min_value=0.0, value=0.0, step=1.0, disabled=True)
+        p3.caption("Troco")
+        p3.markdown(f"**{money_fmt(change)}**")
+        st.info("Venda em aberto: o estoque será baixado normalmente, e a quitação acontece depois.")
     else:
         paid = p2.number_input("Pago (R$)*", min_value=0.0, value=float(total), step=1.0)
         change = float(paid) - float(total)
-        p3.markdown(f"**Troco:** {money_fmt(max(change, 0))}")
+        p3.caption("Troco")
+        p3.markdown(f"**{money_fmt(change)}**")
 
     st.divider()
     f1, f2 = st.columns(2)
@@ -169,7 +175,7 @@ def render() -> None:
         if seller_id is None:
             st.error("Selecione um vendedor.")
             return
-        if payment_method != "Fiado" and float(paid) < float(total):
+        if (not str(payment_method).strip().lower().startswith("fiado")) and float(paid) < float(total):
             st.error(f"Valor pago ({money_fmt(paid)}) menor que total ({money_fmt(total)}).")
             return
         if not st.session_state.cart:
@@ -232,7 +238,8 @@ def _finalize_sale(
     Rollback automático em qualquer exceção.
     """
     product_ids = [it["product_id"] for it in cart]
-    status = "ABERTO" if payment_method == "Fiado" else "PAGO"
+    is_fiado = str(payment_method).strip().lower().startswith("fiado")
+    status = "ABERTO" if is_fiado else "PAGO"
 
     with transaction() as conn:
         # 1+2) Lock + re-validação
