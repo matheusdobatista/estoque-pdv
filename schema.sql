@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS products (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Quantidade inicial cadastrada (para prestação de contas / consignação)
+-- Quantidade inicial cadastrada (para presta  o de contas / consigna  o)
 ALTER TABLE products ADD COLUMN IF NOT EXISTS initial_stock INTEGER;
 
 UPDATE products
