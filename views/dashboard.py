@@ -1,131 +1,61 @@
-"""Dashboard (UX upgrade)
+"""
+Dashboard gerencial.
 
-Mudanças:
-- Sem filtro de datas (usa tudo que existe no banco)
-- KPIs em cards (estilo “print 1”)
-- Remove gráfico de evolução do período
-- Rankings com visual mais limpo (estilo “print 2”)
-- Mantém Prestação de contas (consignantes)
-- Adiciona relatório detalhado de itens vendidos (1 linha por item) + export Excel
-- Remove relatório de estoque baixo
+Ajustes (patch):
+- Mantém KPIs e rankings existentes.
+- Adiciona: relatório detalhado por item vendido + exportação.
+- Adiciona: exclusão de 1+ vendas (com estorno de estoque e limpeza de movimentos/itens).
+
+Obs.: exclusão é uma ação forte. Recomendado usar apenas por ADMIN.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
-import plotly.express as px
 
-from auth import require_login
-from db import query
+from audit import log as audit_log
+from auth import has_role, require_login
+from db import query, transaction
 from utils import df_to_xlsx_bytes, money_fmt
 
 
 def render() -> None:
-    require_login()
-
-    _inject_css()
+    user = require_login()
 
     st.title("📊 Dashboard")
-    st.caption("Resumo geral do Mercadinho (sem filtro de datas).")
 
-    # Período “all time” (sistema rodará por pouco tempo)
-    start_ts = datetime(2000, 1, 1)
-    end_ts = datetime.utcnow() + timedelta(days=1)
+    today = date.today()
+    c1, c2, _ = st.columns([1, 1, 3])
+    start = c1.date_input("De", value=today - timedelta(days=30))
+    end = c2.date_input("Até", value=today)
 
-    _kpis_cards(start_ts, end_ts)
+    start_ts = datetime.combine(start, datetime.min.time())
+    end_ts = datetime.combine(end + timedelta(days=1), datetime.min.time())
+
+    _kpis(start_ts, end_ts)
+    st.divider()
+    _charts(start_ts, end_ts)
+    st.divider()
+    _rankings(start_ts, end_ts)
     st.divider()
 
-    _rankings_clean(start_ts, end_ts)
+    st.subheader("📦 Detalhamento (1 linha por item vendido)")
+    st.caption("Exportável para Excel. Cada linha é um item de uma venda.")
+    _sales_items_detail(start_ts, end_ts)
+
     st.divider()
-
-    _consignor_report(start_ts, end_ts)
-    st.divider()
-
-    _sales_items_report(start_ts, end_ts)
+    _delete_sales_tool(user, start_ts, end_ts)
 
 
-def _inject_css() -> None:
-    st.markdown(
-        """
-<style>
-/* KPI cards */
-.kpi-grid{
-  display:grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
-  gap: 14px;
-}
-@media (max-width: 1200px){
-  .kpi-grid{ grid-template-columns: repeat(2, minmax(160px, 1fr)); }
-}
-.kpi{
-  background: #ffffff;
-  border: 1px solid rgba(0,0,0,.06);
-  border-radius: 16px;
-  padding: 14px 14px 12px 14px;
-  box-shadow: 0 10px 22px rgba(0,0,0,.05);
-}
-.kpi-top{
-  display:flex;
-  align-items:center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-.kpi-ico{
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  font-size: 16px;
-  background: rgba(17,75,95,.10);
-  color: #114B5F;
-}
-.kpi-title{
-  font-size: 13px;
-  font-weight: 600;
-  color: rgba(0,0,0,.55);
-  line-height: 1.1;
-}
-.kpi-value{
-  font-size: 28px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  margin-top: 2px;
-}
-.kpi-sub{
-  margin-top: 4px;
-  font-size: 12px;
-  color: rgba(0,0,0,.50);
-}
+# ---------------------------------------------------------------------------
+# KPIs
+# ---------------------------------------------------------------------------
 
-/* Chart containers */
-.chart-card{
-  background: #ffffff;
-  border: 1px solid rgba(0,0,0,.06);
-  border-radius: 18px;
-  padding: 14px 14px 10px 14px;
-  box-shadow: 0 10px 22px rgba(0,0,0,.05);
-}
-.chart-title{
-  font-weight: 800;
-  margin-bottom: 6px;
-}
-.chart-sub{
-  color: rgba(0,0,0,.55);
-  font-size: 12px;
-  margin-bottom: 10px;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _kpi_cards(start_ts: datetime, end_ts: datetime) -> None:
+def _kpis(start_ts: datetime, end_ts: datetime) -> None:
     r = query(
         """
         SELECT
@@ -142,9 +72,8 @@ def _kpi_cards(start_ts: datetime, end_ts: datetime) -> None:
 
     profit_row = query(
         """
-        SELECT
-            COALESCE(SUM(si.qty * (si.unit_price - COALESCE(si.unit_cost, 0))), 0) AS gross_profit,
-            COALESCE(SUM(si.line_total), 0) AS gross_revenue
+        SELECT COALESCE(SUM(si.qty * (si.unit_price - COALESCE(si.unit_cost, 0))), 0) AS gross_profit,
+               COALESCE(SUM(si.line_total), 0) AS gross_revenue
         FROM sale_items si
         JOIN sales s ON s.id = si.sale_id
         WHERE s.created_at >= %s AND s.created_at < %s
@@ -153,304 +82,283 @@ def _kpi_cards(start_ts: datetime, end_ts: datetime) -> None:
         [start_ts, end_ts],
     )[0]
 
-    revenue = float(r.get("revenue") or 0)
-    sales_count = int(r.get("sales_count") or 0)
-    ticket = float(r.get("ticket_avg") or 0)
-    open_total = float(r.get("open_total") or 0)
-    open_count = int(r.get("open_count") or 0)
-
-    gross_profit = float(profit_row.get("gross_profit") or 0)
-    gross_rev = float(profit_row.get("gross_revenue") or 0)
+    gross_profit = float(profit_row["gross_profit"] or 0)
+    gross_rev = float(profit_row["gross_revenue"] or 0)
     margin = (gross_profit / gross_rev * 100) if gross_rev > 0 else 0.0
-    cost_total = max(gross_rev - gross_profit, 0.0)
 
-    st.markdown(
-        f"""
-<div class="kpi-grid">
-  {_kpi_html("💰","Faturamento", money_fmt(revenue), "Total vendido")}
-  {_kpi_html("🧾","Vendas", f"{sales_count}", "Quantidade de cupons")}
-  {_kpi_html("🎟️","Ticket médio", money_fmt(ticket), "Média por venda")}
-  {_kpi_html("⏳","Em aberto (Fiado)", money_fmt(open_total), f"{open_count} venda(s)")}
-</div>
-<br/>
-<div class="kpi-grid" style="grid-template-columns: repeat(2, minmax(160px, 1fr));">
-  {_kpi_html("📈","Lucro bruto (pagos)", money_fmt(gross_profit), f"Margem: {margin:,.1f}%".replace(",", "X").replace(".", ",").replace("X","."))}
-  {_kpi_html("🧮","Custo estimado (pagos)", money_fmt(cost_total), "Custo total (unitário x qtd)")}
-</div>
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Faturamento", money_fmt(r["revenue"]))
+    k2.metric("Vendas", f"{r['sales_count']}")
+    k3.metric("Ticket médio", money_fmt(r["ticket_avg"]))
+
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Lucro bruto (pagos)", money_fmt(gross_profit))
+    k5.metric("Margem", f"{margin:.1f}%")
+    k6.metric("Em aberto (fiado)", money_fmt(r["open_total"]), delta=f"{r['open_count']} vendas")
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+
+def _charts(start_ts: datetime, end_ts: datetime) -> None:
+    rows = query(
+        """
+        SELECT DATE(created_at) AS day,
+               COUNT(*)          AS sales_count,
+               SUM(total)        AS revenue
+        FROM sales
+        WHERE created_at >= %s AND created_at < %s
+        GROUP BY DATE(created_at)
+        ORDER BY day
         """,
-        unsafe_allow_html=True,
+        [start_ts, end_ts],
     )
+    if not rows:
+        st.info("Sem vendas no período.")
+        return
 
+    df = pd.DataFrame(rows)
+    df["revenue"] = df["revenue"].astype(float)
 
-def _kpi_html(icon: str, title: str, value: str, sub: str) -> str:
-    return (
-        f"<div class='kpi'>"
-        f"  <div class='kpi-top'>"
-        f"    <div class='kpi-ico'>{icon}</div>"
-        f"    <div class='kpi-title'>{title}</div>"
-        f"  </div>"
-        f"  <div class='kpi-value'>{value}</div>"
-        f"  <div class='kpi-sub'>{sub}</div>"
-        f"</div>"
+    st.subheader("Faturamento por dia")
+    bar = (
+        alt.Chart(df)
+        .mark_bar(color="#14B8A6")
+        .encode(
+            x=alt.X("day:T", title="Dia"),
+            y=alt.Y("revenue:Q", title="Faturamento (R$)"),
+            tooltip=[
+                alt.Tooltip("day:T", title="Dia"),
+                alt.Tooltip("revenue:Q", title="R$", format=",.2f"),
+                alt.Tooltip("sales_count:Q", title="Vendas"),
+            ],
+        )
+        .properties(height=280)
     )
+    st.altair_chart(bar, use_container_width=True)
 
 
-def _rankings_clean(start_ts: datetime, end_ts: datetime) -> None:
-    st.subheader("🏆 Rankings")
+# ---------------------------------------------------------------------------
+# Rankings
+# ---------------------------------------------------------------------------
 
-    c1, c2 = st.columns(2)
+def _rankings(start_ts: datetime, end_ts: datetime) -> None:
+    left, right = st.columns(2)
 
-    df_prod = pd.DataFrame(
-        query(
+    with left:
+        st.subheader("Top 10 produtos")
+        rows = query(
             """
-            SELECT
-              p.name AS produto,
-              p.sku AS sku,
-              COALESCE(SUM(si.qty),0) AS qtd,
-              COALESCE(SUM(si.line_total),0) AS faturamento
+            SELECT p.name,
+                   SUM(si.qty)        AS qty,
+                   SUM(si.line_total) AS revenue
             FROM sale_items si
             JOIN sales s ON s.id = si.sale_id
             JOIN products p ON p.id = si.product_id
             WHERE s.created_at >= %s AND s.created_at < %s
-            GROUP BY p.id
-            ORDER BY faturamento DESC
+            GROUP BY p.name
+            ORDER BY revenue DESC
             LIMIT 10
             """,
             [start_ts, end_ts],
         )
-    )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["revenue"] = df["revenue"].astype(float)
+            st.dataframe(
+                df.rename(columns={"name": "Produto", "qty": "Qtd", "revenue": "Receita"}),
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Receita": st.column_config.NumberColumn(format="R$ %.2f")},
+            )
+        else:
+            st.caption("Sem dados.")
 
-    df_sell = pd.DataFrame(
-        query(
+    with right:
+        st.subheader("Top vendedores")
+        rows = query(
             """
-            SELECT
-              COALESCE(se.name, '—') AS vendedor,
-              COUNT(*) AS vendas,
-              COALESCE(SUM(s.total),0) AS faturamento
+            SELECT COALESCE(sl.name, '(sem vendedor)') AS seller,
+                   COUNT(*)      AS sales,
+                   SUM(s.total)  AS revenue
             FROM sales s
-            LEFT JOIN sellers se ON se.id = s.seller_id
+            LEFT JOIN sellers sl ON sl.id = s.seller_id
             WHERE s.created_at >= %s AND s.created_at < %s
-            GROUP BY vendedor
-            ORDER BY faturamento DESC
+            GROUP BY sl.name
+            ORDER BY revenue DESC
             LIMIT 10
             """,
             [start_ts, end_ts],
         )
-    )
-
-    with c1:
-        st.markdown("<div class='chart-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='chart-title'>Top produtos (faturamento)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='chart-sub'>Barras horizontais • valores fora da barra</div>", unsafe_allow_html=True)
-        if df_prod.empty:
-            st.info("Sem dados ainda.")
+        if rows:
+            df = pd.DataFrame(rows)
+            df["revenue"] = df["revenue"].astype(float)
+            st.dataframe(
+                df.rename(columns={"seller": "Vendedor", "sales": "Vendas", "revenue": "Receita"}),
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Receita": st.column_config.NumberColumn(format="R$ %.2f")},
+            )
         else:
-            dfp = df_prod.sort_values("faturamento", ascending=True)
-            fig = px.bar(dfp, x="faturamento", y="produto", orientation="h", text="faturamento")
-            fig.update_traces(
-                marker_color="#114B5F",
-                texttemplate="R$ %{x:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
-            fig.update_layout(
-                height=360,
-                margin=dict(l=10, r=34, t=0, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                showlegend=False,
-            )
-            fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
-            fig.update_yaxes(showgrid=False, ticks="", title=None)
-            st.plotly_chart(fig, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with c2:
-        st.markdown("<div class='chart-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='chart-title'>Ranking vendedores (faturamento)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='chart-sub'>Total vendido por vendedor</div>", unsafe_allow_html=True)
-        if df_sell.empty:
-            st.info("Sem dados ainda.")
-        else:
-            dfs = df_sell.sort_values("faturamento", ascending=True)
-            fig = px.bar(dfs, x="faturamento", y="vendedor", orientation="h", text="faturamento")
-            fig.update_traces(
-                marker_color="#1A936F",
-                texttemplate="R$ %{x:,.2f}",
-                textposition="outside",
-                cliponaxis=False,
-            )
-            fig.update_layout(
-                height=360,
-                margin=dict(l=10, r=34, t=0, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                showlegend=False,
-            )
-            fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
-            fig.update_yaxes(showgrid=False, ticks="", title=None)
-            st.plotly_chart(fig, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.caption("Sem dados.")
 
 
-def _sales_items_report(start_ts: datetime, end_ts: datetime) -> None:
-    st.subheader("🧾 Detalhamento de itens vendidos")
-    st.caption("1 linha por item vendido (venda + produto + consignante).")
+# ---------------------------------------------------------------------------
+# Detalhamento: 1 linha por item vendido
+# ---------------------------------------------------------------------------
 
+def _sales_items_detail(start_ts: datetime, end_ts: datetime) -> None:
     rows = query(
         """
         SELECT
-            s.id AS venda_id,
-            s.created_at AS data_hora,
-            COALESCE(se.name, '—') AS vendedor,
-            COALESCE(s.buyer_name, '') AS comprador,
-            COALESCE(s.buyer_team, '') AS equipe_comprador,
-            s.payment_method AS forma_pagamento,
-            s.payment_status AS status_pagamento,
-
-            p.sku AS sku,
-            p.name AS produto,
-            si.qty AS qtd,
-            si.unit_price AS preco_unit,
-            COALESCE(si.unit_cost, p.unit_cost, 0) AS custo_unit,
-            si.line_total AS faturamento_item,
-
-            CASE WHEN p.is_consigned THEN 'Consignado' ELSE 'Padrão' END AS tipo,
-            COALESCE(cg.name,'') AS consignante,
-            COALESCE(p.supplier_unit_cost, 0) AS repasse_unit,
-            (COALESCE(p.supplier_unit_cost, 0) * si.qty) AS repasse_total
+            s.id                              AS sale_id,
+            s.created_at                      AS created_at,
+            COALESCE(sl.name,'')              AS seller,
+            COALESCE(s.buyer_name,'')         AS buyer,
+            COALESCE(s.buyer_team,'')         AS buyer_team,
+            s.payment_method                  AS payment_method,
+            s.payment_status                  AS payment_status,
+            p.sku                             AS sku,
+            p.name                            AS product,
+            si.qty                            AS qty,
+            si.unit_price                     AS unit_price,
+            COALESCE(si.unit_cost, p.unit_cost, 0) AS unit_cost,
+            si.line_total                     AS line_total,
+            CASE WHEN p.is_consigned THEN 'Consignado' ELSE 'Padrão' END AS product_type,
+            COALESCE(c.name,'')               AS consignor,
+            COALESCE(p.supplier_unit_cost,0)  AS consignor_unit,
+            (COALESCE(p.supplier_unit_cost,0) * si.qty) AS consignor_total,
+            (si.line_total - (COALESCE(si.unit_cost, p.unit_cost, 0) * si.qty)) AS gross_profit
         FROM sale_items si
         JOIN sales s ON s.id = si.sale_id
-        LEFT JOIN sellers se ON se.id = s.seller_id
+        LEFT JOIN sellers sl ON sl.id = s.seller_id
         JOIN products p ON p.id = si.product_id
-        LEFT JOIN consignors cg ON cg.id = p.consignor_id
+        LEFT JOIN consignors c ON c.id = p.consignor_id
         WHERE s.created_at >= %s AND s.created_at < %s
-        ORDER BY s.created_at DESC, s.id DESC, si.id DESC
+        ORDER BY s.created_at DESC, s.id DESC
         """,
         [start_ts, end_ts],
     )
 
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        st.info("Sem itens vendidos ainda.")
+    if not rows:
+        st.info("Sem itens vendidos no período.")
         return
 
+    df = pd.DataFrame(rows)
+
     st.download_button(
-        "⬇️ Exportar itens vendidos (Excel)",
+        "⬇️ Exportar detalhamento (Excel)",
         data=df_to_xlsx_bytes(df, "ItensVendidos"),
         file_name="itens_vendidos_detalhado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-    st.dataframe(df, use_container_width=True, height=520)
-
-
-def _consignor_report(start_ts: datetime, end_ts: datetime) -> None:
-    st.subheader("📄 Prestação de contas — Consignantes")
-    st.caption("Comparativo por produto: cadastrado (inicial) × vendido no período, com faturamento e repasse.")
-
-    cons = query("SELECT id, name, active FROM consignors ORDER BY active DESC, name")
-    if not cons:
-        st.info("Nenhum consignante cadastrado.")
-        return
-
-    opts = {"— Selecione —": None}
-    for c in cons:
-        label = c["name"] + (" (inativo)" if not c.get("active", True) else "")
-        opts[label] = c["id"]
-
-    picked = st.selectbox("Consignante", list(opts.keys()), key="dash_consignor_pick")
-    consignor_id = opts.get(picked)
-    if not consignor_id:
-        st.info("Selecione um consignante para gerar o relatório.")
-        return
-
-    rows = query(
-        """
-        SELECT
-          p.sku,
-          p.name AS produto,
-          COALESCE(p.initial_stock, 0) AS qtd_inicial,
-          p.price::numeric(12,2) AS preco_unit,
-          COALESCE(p.supplier_unit_cost, 0)::numeric(12,2) AS repasse_unit,
-          COALESCE(SUM(si.qty), 0) AS qtd_vendida,
-          COALESCE(SUM(si.line_total), 0)::numeric(12,2) AS faturamento_real
-        FROM products p
-        LEFT JOIN sale_items si ON si.product_id = p.id
-        LEFT JOIN sales s ON s.id = si.sale_id
-                      AND s.created_at >= %s AND s.created_at < %s
-        WHERE p.is_consigned = TRUE
-          AND p.consignor_id = %s
-        GROUP BY p.sku, p.name, p.initial_stock, p.price, p.supplier_unit_cost
-        ORDER BY p.name
-        """,
-        [start_ts, end_ts, consignor_id],
-    )
-
-    if not rows:
-        st.warning("Nenhum produto consignado encontrado para este consignante.")
-        return
-
-    df = pd.DataFrame(rows)
-    df["qtd_inicial"] = df["qtd_inicial"].fillna(0).astype(int)
-    df["qtd_vendida"] = df["qtd_vendida"].fillna(0).astype(int)
-    df["preco_unit"] = df["preco_unit"].astype(float)
-    df["repasse_unit"] = df["repasse_unit"].astype(float)
-    df["faturamento_real"] = df["faturamento_real"].astype(float)
-
-    df["exp_faturamento"] = df["preco_unit"] * df["qtd_inicial"]
-    df["exp_repasse"] = df["repasse_unit"] * df["qtd_inicial"]
-    df["repasse_real"] = df["repasse_unit"] * df["qtd_vendida"]
-    df["saldo_qtd"] = df["qtd_inicial"] - df["qtd_vendida"]
-
-    show = df[[
-        "sku", "produto",
-        "qtd_inicial", "qtd_vendida", "saldo_qtd",
-        "preco_unit", "exp_faturamento", "faturamento_real",
-        "repasse_unit", "exp_repasse", "repasse_real",
-    ]].rename(columns={
-        "sku": "SKU",
-        "produto": "Produto",
-        "qtd_inicial": "Qtd inicial",
-        "qtd_vendida": "Qtd vendida",
-        "saldo_qtd": "Saldo (qtd)",
-        "preco_unit": "Preço unit.",
-        "exp_faturamento": "Expectativa fatur.",
-        "faturamento_real": "Faturamento real",
-        "repasse_unit": "Repasse unit.",
-        "exp_repasse": "Expectativa repasse",
-        "repasse_real": "Repasse real",
-    })
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Faturamento real", money_fmt(show["Faturamento real"].sum()))
-    c2.metric("Repasse real", money_fmt(show["Repasse real"].sum()))
-    c3.metric("Expectativa fatur.", money_fmt(show["Expectativa fatur."].sum()))
-    c4.metric("Expectativa repasse", money_fmt(show["Expectativa repasse"].sum()))
 
     st.dataframe(
-        show,
+        df,
         hide_index=True,
         use_container_width=True,
         column_config={
-            "Preço unit.": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Expectativa fatur.": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Faturamento real": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Repasse unit.": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Expectativa repasse": st.column_config.NumberColumn(format="R$ %.2f"),
-            "Repasse real": st.column_config.NumberColumn(format="R$ %.2f"),
+            "unit_price": st.column_config.NumberColumn("Preço unit.", format="R$ %.2f"),
+            "unit_cost": st.column_config.NumberColumn("Custo unit.", format="R$ %.2f"),
+            "line_total": st.column_config.NumberColumn("Faturamento item", format="R$ %.2f"),
+            "consignor_unit": st.column_config.NumberColumn("Repasse unit.", format="R$ %.2f"),
+            "consignor_total": st.column_config.NumberColumn("Repasse total", format="R$ %.2f"),
+            "gross_profit": st.column_config.NumberColumn("Lucro bruto", format="R$ %.2f"),
         },
-        height=420,
+        height=520,
     )
 
-    st.download_button(
-        "⬇️ Exportar prestação de contas (Excel)",
-        data=df_to_xlsx_bytes(show, "PrestacaoConsignante"),
-        file_name=f"prestacao_consignante_{consignor_id}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+
+# ---------------------------------------------------------------------------
+# Exclusão de vendas (com estorno de estoque)
+# ---------------------------------------------------------------------------
+
+def _delete_sales_tool(user, start_ts: datetime, end_ts: datetime) -> None:
+    can_delete_sales = has_role(user, {"ADMIN"})
+
+    st.subheader("🗑️ Excluir vendas")
+    st.caption(
+        "Atenção: excluir venda remove os itens e os movimentos associados e **estorna o estoque**. "
+        "Recomendado apenas para correções (ADMIN)."
     )
-# ---------------------------------------------------------------------------
-# Low stock
-# ---------------------------------------------------------------------------
+
+    if not can_delete_sales:
+        st.info("Somente ADMIN pode excluir vendas.")
+        return
+
+    sales = query(
+        """
+        SELECT s.id, s.created_at, COALESCE(sl.name,'') AS seller,
+               COALESCE(s.buyer_name,'') AS buyer,
+               COALESCE(s.buyer_team,'') AS buyer_team,
+               s.payment_method, s.payment_status,
+               s.total
+        FROM sales s
+        LEFT JOIN sellers sl ON sl.id = s.seller_id
+        WHERE s.created_at >= %s AND s.created_at < %s
+        ORDER BY s.created_at DESC
+        LIMIT 300
+        """,
+        [start_ts, end_ts],
+    )
+
+    if not sales:
+        st.info("Sem vendas no período.")
+        return
+
+    df = pd.DataFrame(sales)
+    df.insert(0, "Excluir", False)
+
+    editor = st.data_editor(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Excluir": st.column_config.CheckboxColumn("Excluir"),
+            "total": st.column_config.NumberColumn("Total", format="R$ %.2f"),
+        },
+        height=360,
+    )
+
+    picked = editor[editor["Excluir"] == True]  # noqa: E712
+    picked_ids = [int(x) for x in picked["id"].tolist()] if not picked.empty else []
+
+    if st.button(
+        f"🧨 Excluir {len(picked_ids)} venda(s) selecionada(s)",
+        type="primary",
+        use_container_width=True,
+        disabled=(len(picked_ids) == 0),
+    ):
+        _delete_sales_atomic(user, picked_ids)
+        st.success("Vendas excluídas e estoque estornado.")
+        st.rerun()
+
+
+def _delete_sales_atomic(user, sale_ids: list[int]) -> None:
+    """Exclui vendas e estorna estoque de forma transacional."""
+    with transaction() as conn:
+        for sid in sale_ids:
+            # Carrega itens da venda
+            cur_items = conn.execute(
+                "SELECT product_id, qty FROM sale_items WHERE sale_id = %s",
+                [sid],
+            )
+            items = cur_items.fetchall()
+
+            # Estorna estoque
+            for it in items:
+                conn.execute(
+                    "UPDATE products SET stock = stock + %s WHERE id = %s",
+                    [int(it["qty"]), int(it["product_id"])],
+                )
+
+            # Remove movimentos criados pela venda
+            conn.execute("DELETE FROM movements WHERE note = %s", [f"Venda #{sid}"])
+
+            # Remove itens e venda
+            conn.execute("DELETE FROM sale_items WHERE sale_id = %s", [sid])
+            conn.execute("DELETE FROM sales WHERE id = %s", [sid])
+
+            audit_log(user, "SALE_DELETE", "sale", sid, {"sale_id": sid}, conn=conn)
