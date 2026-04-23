@@ -34,7 +34,7 @@ def render() -> None:
 
 def _tab_list(user, *, can_write: bool, can_delete: bool) -> None:
     rows = query("""
-        SELECT p.id, p.sku, p.name, p.price, p.unit_cost, p.stock, p.min_stock,
+        SELECT p.id, p.sku, p.name, p.price, p.unit_cost, p.stock, p.initial_stock, p.min_stock,
                p.active, p.is_consigned, p.supplier_unit_cost,
                c.name AS consignor_name
         FROM products p
@@ -64,11 +64,11 @@ def _tab_list(user, *, can_write: bool, can_delete: bool) -> None:
     st.caption(f"{len(view)} produto(s)")
 
     display = view[[
-        "sku", "name", "price", "unit_cost", "stock", "min_stock",
+        "sku", "name", "price", "unit_cost", "stock", "initial_stock", "min_stock",
         "is_consigned", "consignor_name", "active",
     ]].rename(columns={
         "sku": "SKU", "name": "Nome", "price": "Preço", "unit_cost": "Custo",
-        "stock": "Estoque", "min_stock": "Mín", "is_consigned": "Consig.",
+        "stock": "Estoque", "initial_stock": "Inicial", "min_stock": "Mín", "is_consigned": "Consig.",
         "consignor_name": "Consignante", "active": "Ativo",
     })
     st.dataframe(
@@ -157,14 +157,15 @@ def _tab_new(user) -> None:
 
         query(
             "INSERT INTO products "
-            "(name, sku, price, unit_cost, stock, min_stock, is_consigned, "
+            "(name, sku, price, unit_cost, stock, initial_stock, min_stock, is_consigned, "
             " consignor_id, supplier_unit_cost) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             [
                 name.strip(),
                 sku.strip(),
                 float(price),
                 float(unit_cost) if unit_cost and unit_cost > 0 else None,
+                int(stock),
                 int(stock),
                 int(min_stock),
                 bool(is_consigned),

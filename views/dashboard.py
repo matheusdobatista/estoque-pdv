@@ -37,6 +37,8 @@ def render() -> None:
     st.divider()
     _rankings(start_ts, end_ts)
     st.divider()
+    _consignor_report(start_ts, end_ts)
+    st.divider()
     _low_stock()
 
 
@@ -249,6 +251,117 @@ def _rankings(start_ts: datetime, end_ts: datetime) -> None:
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Prestação de contas (Consignantes)
+# ---------------------------------------------------------------------------
+
+def _consignor_report(start_ts: datetime, end_ts: datetime) -> None:
+    st.subheader("📄 Prestação de contas — Consignantes")
+    st.caption("Comparativo por produto: cadastrado (inicial) × vendido no período, com faturamento e repasse.")
+
+    cons = query("SELECT id, name, active FROM consignors ORDER BY active DESC, name")
+    if not cons:
+        st.info("Nenhum consignante cadastrado.")
+        return
+
+    opts = {"— Selecione —": None}
+    for c in cons:
+        label = c["name"] + (" (inativo)" if not c.get("active", True) else "")
+        opts[label] = c["id"]
+
+    picked = st.selectbox("Consignante", list(opts.keys()), key="dash_consignor_pick")
+    consignor_id = opts.get(picked)
+    if not consignor_id:
+        st.info("Selecione um consignante para gerar o relatório.")
+        return
+
+    rows = query(
+        """
+        SELECT
+          p.sku,
+          p.name AS produto,
+          COALESCE(p.initial_stock, 0) AS qtd_inicial,
+          p.price::numeric(12,2) AS preco_unit,
+          COALESCE(p.supplier_unit_cost, 0)::numeric(12,2) AS repasse_unit,
+          COALESCE(SUM(si.qty), 0) AS qtd_vendida,
+          COALESCE(SUM(si.line_total), 0)::numeric(12,2) AS faturamento_real
+        FROM products p
+        LEFT JOIN sale_items si ON si.product_id = p.id
+        LEFT JOIN sales s ON s.id = si.sale_id
+                      AND s.created_at >= %s AND s.created_at < %s
+        WHERE p.is_consigned = TRUE
+          AND p.consignor_id = %s
+        GROUP BY p.sku, p.name, p.initial_stock, p.price, p.supplier_unit_cost
+        ORDER BY p.name
+        """,
+        [start_ts, end_ts, consignor_id],
+    )
+
+    if not rows:
+        st.warning("Nenhum produto consignado encontrado para este consignante.")
+        return
+
+    df = pd.DataFrame(rows)
+    df["qtd_inicial"] = df["qtd_inicial"].fillna(0).astype(int)
+    df["qtd_vendida"] = df["qtd_vendida"].fillna(0).astype(int)
+    df["preco_unit"] = df["preco_unit"].astype(float)
+    df["repasse_unit"] = df["repasse_unit"].astype(float)
+    df["faturamento_real"] = df["faturamento_real"].astype(float)
+
+    df["exp_faturamento"] = df["preco_unit"] * df["qtd_inicial"]
+    df["exp_repasse"] = df["repasse_unit"] * df["qtd_inicial"]
+    df["repasse_real"] = df["repasse_unit"] * df["qtd_vendida"]
+    df["saldo_qtd"] = df["qtd_inicial"] - df["qtd_vendida"]
+
+    show = df[[
+        "sku", "produto",
+        "qtd_inicial", "qtd_vendida", "saldo_qtd",
+        "preco_unit", "exp_faturamento", "faturamento_real",
+        "repasse_unit", "exp_repasse", "repasse_real",
+    ]].rename(columns={
+        "sku": "SKU",
+        "produto": "Produto",
+        "qtd_inicial": "Qtd inicial",
+        "qtd_vendida": "Qtd vendida",
+        "saldo_qtd": "Saldo (qtd)",
+        "preco_unit": "Preço unit.",
+        "exp_faturamento": "Expectativa fatur.",
+        "faturamento_real": "Faturamento real",
+        "repasse_unit": "Repasse unit.",
+        "exp_repasse": "Expectativa repasse",
+        "repasse_real": "Repasse real",
+    })
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Faturamento real", money_fmt(show["Faturamento real"].sum()))
+    c2.metric("Repasse real", money_fmt(show["Repasse real"].sum()))
+    c3.metric("Expectativa fatur.", money_fmt(show["Expectativa fatur."].sum()))
+    c4.metric("Expectativa repasse", money_fmt(show["Expectativa repasse"].sum()))
+
+    st.dataframe(
+        show,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Preço unit.": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Expectativa fatur.": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Faturamento real": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Repasse unit.": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Expectativa repasse": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Repasse real": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+        height=420,
+    )
+
+    st.download_button(
+        "⬇️ Exportar prestação de contas (Excel)",
+        data=df_to_xlsx_bytes(show, "PrestacaoConsignante"),
+        file_name=f"prestacao_consignante_{consignor_id}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 # ---------------------------------------------------------------------------
 # Low stock
 # ---------------------------------------------------------------------------

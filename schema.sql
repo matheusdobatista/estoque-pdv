@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS products (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Quantidade inicial cadastrada (para prestação de contas / consignação)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS initial_stock INTEGER;
+
+UPDATE products
+SET initial_stock = stock
+WHERE initial_stock IS NULL;
+
+ALTER TABLE products ALTER COLUMN initial_stock SET DEFAULT 0;
+ALTER TABLE products ALTER COLUMN initial_stock SET NOT NULL;
+
+
 CREATE INDEX IF NOT EXISTS idx_products_name   ON products(name);
 CREATE INDEX IF NOT EXISTS idx_products_sku    ON products(sku);
 CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
